@@ -1,0 +1,836 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <!-- Updated viewport for mobile to prevent zooming/scrolling -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Builder Hands: Village Map</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+    <!-- Use latest version for best compatibility -->
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+    
+    <!-- Fun Kid Font -->
+    <link href="https://fonts.googleapis.com/css2?family=Fredoka+One&display=swap" rel="stylesheet">
+
+    <style>
+        body { 
+            margin: 0; 
+            overflow: hidden; 
+            background: linear-gradient(135deg, #87CEEB 0%, #4682B4 100%); /* Blue Sky bg */
+            font-family: 'Fredoka One', cursive;
+            touch-action: none; /* Prevent Pull-to-refresh on mobile */
+        }
+
+        #canvas-container { position: relative; width: 100vw; height: 100vh; }
+        
+        /* Fixed: Output canvas (skeleton) is now z-index 3 to show ON TOP of the 3D world */
+        #output_canvas { 
+            position: absolute; left: 0; top: 0; width: 100%; height: 100%; 
+            z-index: 3; transform: scaleX(-1); object-fit: cover; pointer-events: none;
+        } 
+        #three-canvas { 
+            position: absolute; left: 0; top: 0; width: 100%; height: 100%; 
+            z-index: 2; pointer-events: none; 
+        }
+        #video-element { display: none; }
+        
+        /* UI Layers */
+        .ui-screen {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            z-index: 10; pointer-events: none;
+            display: none; flex-direction: column; padding: 20px;
+        }
+        .ui-screen.active { display: flex; }
+
+        .interactive-overlay {
+            background: rgba(0, 0, 0, 0.7); 
+            align-items: center; justify-content: center;
+            pointer-events: auto; backdrop-filter: blur(5px);
+        }
+
+        .fun-btn {
+            background: #FF5E89; border: 4px solid #fff; color: white;
+            padding: 15px 40px; border-radius: 50px; font-size: 1.5rem;
+            cursor: pointer; box-shadow: 0 6px 0 #C92A55;
+            transition: transform 0.1s;
+        }
+        .fun-btn:active { transform: translateY(6px); box-shadow: none; }
+        .fun-btn.green { background: #4ADE80; box-shadow: 0 6px 0 #22c55e; }
+
+        .status-badge {
+            background: rgba(255,255,255,0.8); border: 2px solid white; color: #333;
+            padding: 10px 20px; border-radius: 30px; font-size: 1.2rem;
+            display: flex; align-items: center; gap: 10px;
+        }
+
+        .pinch-indicator {
+            width: 25px; height: 25px; border-radius: 50%; background: #ccc; border: 3px solid #fff;
+        }
+        .pinch-active { background: #FACC15; box-shadow: 0 0 15px #FACC15; transform: scale(1.2); }
+
+    </style>
+</head>
+<body>
+
+    <video id="video-element" autoplay playsinline></video>
+
+    <div id="canvas-container">
+        <canvas id="output_canvas"></canvas> 
+        <canvas id="three-canvas"></canvas>
+    </div>
+
+    <!-- HUD -->
+    <div id="hud-layer" class="ui-screen">
+        <div class="flex justify-between w-full box-border pr-2 sm:pr-10">
+            <div class="flex gap-2 sm:gap-4">
+                <button onclick="goToMap()" id="back-map-btn" class="pointer-events-auto bg-blue-500 text-white px-4 py-2 rounded-full font-bold border-2 border-white shadow hidden text-sm sm:text-base">
+                    🗺️ Map
+                </button>
+                <div class="status-badge text-sm sm:text-xl px-4 py-2">
+                    <span class="hidden sm:inline">👋 Hand:</span>
+                    <span id="hand-status" class="text-red-500">Wait...</span>
+                </div>
+            </div>
+            <div class="status-badge px-4 py-2">
+                <span class="hidden sm:inline">👌 Pinch:</span>
+                <div id="pinch-visual" class="pinch-indicator"></div>
+            </div>
+        </div>
+        
+        <div class="text-center pb-10" style="text-shadow: 2px 2px 0px rgba(0,0,0,0.5);">
+            <h2 id="instruction-text" class="text-3xl sm:text-4xl text-yellow-300 mb-2 font-bold">Village Map</h2>
+            <p id="sub-instruction" class="text-xl sm:text-2xl text-white">Pinch a pile of crates to build!</p>
+        </div>
+    </div>
+
+    <!-- Start Screen -->
+    <div id="start-screen" class="ui-screen interactive-overlay active">
+        <h1 class="text-5xl sm:text-6xl text-yellow-300 font-extrabold mb-4 text-center" style="text-shadow: 4px 4px #C2410C">Village Builder</h1>
+        <p class="mb-8 text-xl sm:text-2xl text-white text-center max-w-md">Build the whole village with your hands!</p>
+        <button id="start-btn" class="fun-btn">Start Game ▶</button>
+    </div>
+
+    <!-- Level Complete Screen -->
+    <div id="level-complete" class="ui-screen interactive-overlay">
+        <h2 class="text-5xl text-green-400 font-bold mb-4 text-center">House Built!</h2>
+        <div class="text-6xl mb-8">🏠✨</div>
+        <button onclick="goToMap()" class="fun-btn green">Return to Map 🗺️</button>
+    </div>
+
+    <script>
+        // --- 0. Audio System ---
+        const AudioSys = {
+            ctx: null,
+            init: function() {
+                window.AudioContext = window.AudioContext || window.webkitAudioContext;
+                this.ctx = new AudioContext();
+            },
+            playTone: function(freq, type, duration, vol=0.1) {
+                if(!this.ctx) return;
+                const osc = this.ctx.createOscillator();
+                const gain = this.ctx.createGain();
+                osc.type = type;
+                osc.frequency.setValueAtTime(freq, this.ctx.currentTime);
+                gain.gain.setValueAtTime(vol, this.ctx.currentTime);
+                gain.gain.exponentialRampToValueAtTime(0.01, this.ctx.currentTime + duration);
+                osc.connect(gain);
+                gain.connect(this.ctx.destination);
+                osc.start();
+                osc.stop(this.ctx.currentTime + duration);
+            },
+            playPop: function() { this.playTone(400, 'sine', 0.1, 0.2); },
+            playSnap: function() { 
+                this.playTone(800, 'sine', 0.1, 0.1); 
+                setTimeout(()=> this.playTone(1200, 'sine', 0.3, 0.1), 50);
+            },
+            playWin: function() { 
+                [523, 659, 783, 1046].forEach((n, i) => setTimeout(() => this.playTone(n, 'triangle', 0.4, 0.2), i * 150));
+            },
+            playSelect: function() {
+                this.playTone(600, 'sine', 0.1, 0.1);
+            }
+        };
+
+        // --- 1. Data Definitions ---
+        const GEOMETRIES = {
+            box: new THREE.BoxGeometry(1, 1, 1),
+            cylinder: new THREE.CylinderGeometry(0.5, 0.5, 1, 32),
+            cone: new THREE.ConeGeometry(1, 1, 32),
+            sphere: new THREE.SphereGeometry(0.5, 16, 16),
+            dome: new THREE.SphereGeometry(1, 16, 16, 0, Math.PI * 2, 0, Math.PI / 2),
+            // New Arrow Geometry for indicators
+            arrow: new THREE.ConeGeometry(0.8, 1.5, 8) 
+        };
+
+        const MATERIALS = {
+            blue: new THREE.MeshStandardMaterial({ color: 0x60A5FA }),
+            red: new THREE.MeshStandardMaterial({ color: 0xF87171 }),
+            yellow: new THREE.MeshStandardMaterial({ color: 0xFACC15 }),
+            green: new THREE.MeshStandardMaterial({ color: 0x4ADE80 }),
+            purple: new THREE.MeshStandardMaterial({ color: 0xC084FC }),
+            orange: new THREE.MeshStandardMaterial({ color: 0xFB923C }),
+            white: new THREE.MeshStandardMaterial({ color: 0xFFFFFF }),
+            black: new THREE.MeshStandardMaterial({ color: 0x333333 }),
+            glass: new THREE.MeshStandardMaterial({ color: 0xA5F3FC, transparent: true, opacity: 0.7 }),
+            wood: new THREE.MeshStandardMaterial({ color: 0x8B4513 }),
+            grass: new THREE.MeshStandardMaterial({ color: 0x4da64d }),
+            path: new THREE.MeshStandardMaterial({ color: 0xD2B48C }) 
+        };
+
+        const HOUSE_LEVELS = [
+            {
+                name: "Cozy Cottage",
+                mapPos: [-5, 0, -4],
+                parts: [
+                    { id: 'base', type: 'box', scale: [2.5, 2, 2.5], mat: 'blue', target: [0, -1, 0], start: [-3, 0, 0] },
+                    { id: 'roof', type: 'cone', scale: [2, 1.5, 2], mat: 'red', target: [0, 1, 0], start: [3, 2, 0] },
+                    { id: 'door', type: 'box', scale: [0.8, 1.2, 0.1], mat: 'yellow', target: [0, -1.4, 1.3], start: [3, -2, 0] }
+                ]
+            },
+            {
+                name: "Tall Tower",
+                mapPos: [5, 0, -4],
+                parts: [
+                    { id: 'floor1', type: 'box', scale: [2, 2, 2], mat: 'orange', target: [0, -1.5, 0], start: [-3, -2, 0] },
+                    { id: 'floor2', type: 'box', scale: [1.8, 2, 1.8], mat: 'yellow', target: [0, 0.5, 0], start: [3, 0, 0] },
+                    { id: 'roof', type: 'cone', scale: [1.5, 1.5, 1.5], mat: 'purple', target: [0, 2.25, 0], start: [-3, 2, 0] }
+                ]
+            },
+            {
+                name: "Twin Castle",
+                mapPos: [-6, 0, 3],
+                parts: [
+                    { id: 'main', type: 'box', scale: [3, 2, 2], mat: 'white', target: [0, -1, 0], start: [0, -2, 0] },
+                    { id: 'towerL', type: 'cylinder', scale: [0.8, 3, 0.8], mat: 'blue', target: [-2, 0, 0], start: [-3, 1, 0] },
+                    { id: 'towerR', type: 'cylinder', scale: [0.8, 3, 0.8], mat: 'blue', target: [2, 0, 0], start: [3, 1, 0] },
+                    { id: 'peakL', type: 'cone', scale: [1, 1, 1], mat: 'red', target: [-2, 2, 0], start: [-3, -2, 0] },
+                    { id: 'peakR', type: 'cone', scale: [1, 1, 1], mat: 'red', target: [2, 2, 0], start: [3, -2, 0] }
+                ]
+            },
+            {
+                name: "Modern Villa",
+                mapPos: [6, 0, 3],
+                parts: [
+                    { id: 'ground', type: 'box', scale: [3, 1, 2], mat: 'white', target: [0, -1.5, 0], start: [-3, -2, 0] },
+                    { id: 'glass', type: 'box', scale: [2.8, 1.5, 1.8], mat: 'glass', target: [0, -0.25, 0], start: [0, 2, 0] },
+                    { id: 'top', type: 'box', scale: [3.5, 0.5, 2.5], mat: 'orange', target: [0, 0.75, 0], start: [3, -1, 0] },
+                    { id: 'chimney', type: 'box', scale: [0.5, 2, 0.5], mat: 'white', target: [1, 1, 0], start: [-3, 1, 0] }
+                ]
+            },
+            {
+                name: "The Lighthouse",
+                mapPos: [0, 0, -8],
+                parts: [
+                    { id: 'base', type: 'cylinder', scale: [1.2, 1.5, 2], mat: 'red', target: [0, -1.5, 0], start: [-3, -2, 0] },
+                    { id: 'mid', type: 'cylinder', scale: [1.0, 1.2, 2], mat: 'white', target: [0, 0.5, 0], start: [3, 0, 0] },
+                    { id: 'light', type: 'cylinder', scale: [0.8, 0.8, 1], mat: 'yellow', target: [0, 2, 0], start: [-3, 2, 0] },
+                    { id: 'cap', type: 'dome', scale: [0.8, 0.8, 0.8], mat: 'black', target: [0, 2.5, 0], start: [3, 2, 0] }
+                ]
+            }
+        ];
+
+        // --- 2. Game State ---
+        // Detect mobile to set appropriate resolution
+        const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+        
+        const config = {
+            // Lower resolution on mobile for better performance
+            cameraWidth: isMobile ? 640 : 1280, 
+            cameraHeight: isMobile ? 480 : 720,
+            pinchThreshold: 0.08, 
+            snapDistance: 2.0, 
+            grabRadius: 3.5, 
+            smoothing: 0.2
+        };
+
+        const state = {
+            mode: 'START', // START, MAP, BUILD, COMPLETE
+            builtStatus: [false, false, false, false, false],
+            activeLevel: -1,
+            
+            // Hand
+            isPinching: false,
+            handPosition: new THREE.Vector3(0, 0, 0),
+            
+            // Building Mode
+            heldPiece: null,
+            pieces: [], 
+            targets: [], 
+            buildGroup: new THREE.Group(), 
+            completedCount: 0,
+
+            // Map Mode
+            mapGroup: new THREE.Group(),
+            mapInteractables: [] // Piles
+        };
+
+        // --- 3. Scene Setup ---
+        // RESTORED: DOM Element selection that was missing
+        const videoElement = document.getElementById('video-element');
+        const canvasElement = document.getElementById('output_canvas');
+        const canvasCtx = canvasElement.getContext('2d');
+        const handStatus = document.getElementById('hand-status');
+        const pinchVisual = document.getElementById('pinch-visual');
+        const instructionText = document.getElementById('instruction-text');
+        const subInstruction = document.getElementById('sub-instruction');
+        const backBtn = document.getElementById('back-map-btn');
+
+        const screens = {
+            start: document.getElementById('start-screen'),
+            hud: document.getElementById('hud-layer'),
+            levelComplete: document.getElementById('level-complete')
+        };
+
+        const scene = new THREE.Scene();
+        const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 100);
+        const renderer = new THREE.WebGLRenderer({ canvas: document.getElementById('three-canvas'), alpha: true, antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+
+        // Lighting
+        const ambientLight = new THREE.AmbientLight(0xffffff, 0.7);
+        scene.add(ambientLight);
+        const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+        dirLight.position.set(5, 10, 7);
+        scene.add(dirLight);
+
+        // Cursor - FIXED VISIBILITY
+        // depthTest: false ensures it renders ON TOP of everything
+        const cursorMat = new THREE.MeshBasicMaterial({ 
+            color: 0x4ADE80, 
+            transparent: true, 
+            opacity: 0.8,
+            depthTest: false,
+            depthWrite: false
+        });
+        const cursor = new THREE.Mesh(new THREE.SphereGeometry(0.3, 16, 16), cursorMat);
+        cursor.renderOrder = 999; // Force render last (on top)
+        scene.add(cursor);
+
+        // Groups
+        scene.add(state.mapGroup);
+        scene.add(state.buildGroup);
+
+        // --- 4. Logic Functions ---
+
+        function switchScreen(screenName) {
+            Object.values(screens).forEach(s => s.classList.remove('active'));
+            if(screenName !== 'none') screens[screenName].classList.add('active');
+            if(state.mode === 'BUILD' || state.mode === 'MAP') screens.hud.classList.add('active');
+        }
+
+        function createMap() {
+            state.mapGroup.clear();
+            state.mapInteractables = [];
+
+            // Ground
+            const ground = new THREE.Mesh(new THREE.BoxGeometry(30, 1, 30), MATERIALS.grass);
+            ground.position.y = -3;
+            state.mapGroup.add(ground);
+
+            // Central Plaza
+            const plaza = new THREE.Mesh(new THREE.CylinderGeometry(2, 2, 0.2, 32), MATERIALS.white);
+            plaza.position.set(0, -2.4, 0);
+            state.mapGroup.add(plaza);
+            const fountain = new THREE.Mesh(new THREE.CylinderGeometry(0.5, 0.5, 1, 16), MATERIALS.blue);
+            fountain.position.set(0, -1.8, 0);
+            state.mapGroup.add(fountain);
+
+            // Populate Houses/Piles
+            HOUSE_LEVELS.forEach((level, index) => {
+                const pos = new THREE.Vector3(...level.mapPos);
+                
+                // Draw path to center
+                const pathLength = pos.length();
+                const midPoint = pos.clone().multiplyScalar(0.5);
+                const pathGeo = new THREE.BoxGeometry(0.8, 0.1, pathLength);
+                const pathMesh = new THREE.Mesh(pathGeo, MATERIALS.path);
+                pathMesh.position.copy(midPoint);
+                pathMesh.position.y = -2.45;
+                pathMesh.lookAt(pos.x, -2.45, pos.z); 
+                state.mapGroup.add(pathMesh);
+
+                if (state.builtStatus[index]) {
+                    // Show Built House (Miniature)
+                    const houseWrap = new THREE.Group();
+                    level.parts.forEach(part => {
+                        let geo = GEOMETRIES[part.type];
+                        if(geo) {
+                            geo = geo.clone();
+                            if(part.scale) geo.scale(part.scale[0], part.scale[1], part.scale[2]);
+                            let mat = MATERIALS[part.mat] || MATERIALS.white;
+                            const mesh = new THREE.Mesh(geo, mat);
+                            mesh.position.set(...part.target);
+                            houseWrap.add(mesh);
+                        }
+                    });
+                    houseWrap.scale.set(0.8, 0.8, 0.8);
+                    houseWrap.position.copy(pos);
+                    state.mapGroup.add(houseWrap);
+
+                    // Sparkles
+                    const spark = new THREE.Mesh(GEOMETRIES.sphere, MATERIALS.yellow);
+                    spark.scale.set(0.5,0.5,0.5);
+                    spark.position.copy(pos).add(new THREE.Vector3(0, 4, 0));
+                    state.mapGroup.add(spark);
+                } else {
+                    // Show Pile of Materials
+                    const pileGroup = new THREE.Group();
+                    
+                    const crateGeo = new THREE.BoxGeometry(1.2, 1.2, 1.2);
+                    const c1 = new THREE.Mesh(crateGeo, MATERIALS.wood);
+                    const c2 = new THREE.Mesh(crateGeo, MATERIALS.wood);
+                    const c3 = new THREE.Mesh(crateGeo, MATERIALS.wood);
+                    
+                    c1.position.set(0, -1.9, 0);
+                    c2.position.set(0.5, -1.9, 0.8);
+                    c3.position.set(-0.2, -0.8, 0.2);
+                    
+                    pileGroup.add(c1, c2, c3);
+                    pileGroup.position.copy(pos);
+                    
+                    // FIXED: Replaced Ring with Arrow pointing DOWN
+                    const arrowMesh = new THREE.Mesh(GEOMETRIES.arrow, new THREE.MeshBasicMaterial({ color: 0xFFFF00 }));
+                    arrowMesh.position.y = 2.5;
+                    arrowMesh.rotation.x = Math.PI; // Point down
+                    arrowMesh.userData.spin = true;
+                    arrowMesh.userData.bounce = true; // Add bounce tag
+                    pileGroup.add(arrowMesh);
+
+                    // Add hitbox
+                    const hitbox = new THREE.Mesh(new THREE.SphereGeometry(3.0), new THREE.MeshBasicMaterial({visible:false}));
+                    hitbox.position.copy(pos);
+                    hitbox.userData = { isPile: true, index: index };
+                    
+                    state.mapGroup.add(pileGroup);
+                    state.mapInteractables.push(hitbox);
+                }
+            });
+            
+            // Decor: Trees
+            for(let i=0; i<10; i++) {
+                const tree = new THREE.Group();
+                const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.3, 0.3, 2), MATERIALS.wood);
+                trunk.position.y = -2;
+                const leaves = new THREE.Mesh(new THREE.ConeGeometry(1.5, 3, 8), MATERIALS.green);
+                leaves.position.y = 0;
+                tree.add(trunk, leaves);
+                
+                const ang = Math.random() * Math.PI * 2;
+                const rad = 8 + Math.random() * 6;
+                tree.position.set(Math.cos(ang)*rad, 0, Math.sin(ang)*rad);
+                state.mapGroup.add(tree);
+            }
+        }
+
+        function goToMap() {
+            state.mode = 'MAP';
+            createMap();
+            state.buildGroup.clear();
+            state.pieces = [];
+            
+            // Set Camera for Map (Bird's eye)
+            camera.position.set(0, 12, 12);
+            camera.lookAt(0, 0, 0);
+
+            instructionText.innerText = "Village Map";
+            subInstruction.innerText = "Pinch a pile of crates to build!";
+            backBtn.classList.add('hidden');
+            switchScreen('none'); // Just HUD
+        }
+
+        function startLevel(index) {
+            state.activeLevel = index;
+            state.mode = 'BUILD';
+            
+            // Clean up Map
+            state.mapGroup.clear();
+            state.mapInteractables = [];
+
+            // Camera for Build
+            camera.position.set(0, 0, 10);
+            camera.lookAt(0, 0, 0);
+
+            // Load Level Parts
+            const levelData = HOUSE_LEVELS[index];
+            instructionText.innerText = levelData.name;
+            subInstruction.innerText = "Drag pieces to the outline!";
+            backBtn.classList.remove('hidden');
+
+            state.completedCount = 0;
+            state.pieces = [];
+            state.targets = [];
+            state.buildGroup.clear();
+
+            levelData.parts.forEach(part => {
+                // Safety Checks
+                if (!GEOMETRIES[part.type]) return;
+                let mat = MATERIALS[part.mat] || MATERIALS.white;
+
+                let geo = GEOMETRIES[part.type].clone();
+                if(part.scale) geo.scale(...part.scale);
+
+                // Target
+                const ghost = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.15 }));
+                ghost.position.set(...part.target);
+                const wire = new THREE.LineSegments(new THREE.WireframeGeometry(geo));
+                wire.material.color.setHex(0xffffff);
+                wire.material.opacity = 0.4;
+                wire.material.transparent = true;
+                wire.position.set(...part.target);
+                
+                state.buildGroup.add(ghost, wire);
+
+                // Piece
+                const mesh = new THREE.Mesh(geo, mat.clone());
+                mesh.position.set(...part.start);
+                mesh.userData = {
+                    id: part.id,
+                    targetPos: new THREE.Vector3(...part.target),
+                    isLocked: false
+                };
+                
+                state.buildGroup.add(mesh);
+                state.pieces.push(mesh);
+                state.targets.push({mesh: ghost, wire: wire});
+            });
+
+            switchScreen('none');
+            AudioSys.playSelect();
+        }
+
+        function startGame() {
+            AudioSys.init();
+            goToMap();
+        }
+
+        // --- 5. Interaction ---
+
+        // Raycaster for better selection
+        const raycaster = new THREE.Raycaster();
+        const groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0); // Y=0 plane
+
+        function onResults(results) {
+            // Draw
+            canvasCtx.save();
+            canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+            
+            if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+                const landmarks = results.multiHandLandmarks[0];
+                const indexTip = landmarks[8];
+                const thumbTip = landmarks[4];
+                const distance = Math.sqrt(Math.pow(indexTip.x - thumbTip.x, 2) + Math.pow(indexTip.y - thumbTip.y, 2));
+
+                handStatus.innerText = "Ready!";
+                handStatus.className = "text-green-500 font-bold";
+                cursor.visible = true;
+
+                // Pinch Logic
+                const wasPinching = state.isPinching;
+                state.isPinching = distance < config.pinchThreshold;
+
+                if (state.isPinching) {
+                    pinchVisual.classList.add('pinch-active');
+                    cursor.material.color.setHex(0xFACC15);
+                    if(!wasPinching) AudioSys.playPop();
+                } else {
+                    pinchVisual.classList.remove('pinch-active');
+                    cursor.material.color.setHex(0x4ADE80);
+                }
+
+                // Skeleton
+                drawConnectors(canvasCtx, landmarks, HAND_CONNECTIONS, {color: state.isPinching ? '#FACC15' : '#fff', lineWidth: 5});
+
+                // --- IMPROVED 3D MAPPING (Raycasting) ---
+                // 1. Get Normalized Device Coordinates (NDC) from hand center
+                const rawX = (indexTip.x + thumbTip.x) / 2;
+                const rawY = (indexTip.y + thumbTip.y) / 2;
+                
+                // Map 0..1 to -1..1 (and flip X because webcam is mirrored)
+                const ndcX = (1 - rawX) * 2 - 1;
+                const ndcY = -(rawY * 2 - 1);
+
+                // 2. Cast ray from camera
+                raycaster.setFromCamera({ x: ndcX, y: ndcY }, camera);
+
+                // 3. Find where ray hits the "interaction plane"
+                const targetZ = 0;
+                
+                // If in Map mode, we want the cursor on the ground (Y=0 or Y=-2)
+                // If in Build mode, we want it on a plane facing the camera (Z=0)
+                let pos = new THREE.Vector3();
+
+                if (state.mode === 'MAP') {
+                    // Intersect with ground plane roughly at pile height
+                    // We use math to intersect ray with horizontal plane Y=-1
+                    const planeY = -1;
+                    const rayDir = raycaster.ray.direction;
+                    const rayOrigin = raycaster.ray.origin;
+                    // rayOrigin.y + t * rayDir.y = planeY => t = (planeY - rayOrigin.y) / rayDir.y
+                    if (rayDir.y !== 0) {
+                        const t = (planeY - rayOrigin.y) / rayDir.y;
+                        if (t > 0) {
+                            pos.copy(rayOrigin).add(rayDir.multiplyScalar(t));
+                        }
+                    }
+                } else {
+                    // Build Mode: Standard Z-plane projection (existing logic is fine, or simple vector unproject)
+                    const vec = new THREE.Vector3(ndcX, ndcY, 0.5);
+                    vec.unproject(camera);
+                    const dir = vec.sub(camera.position).normalize();
+                    const distToPlane = (0 - camera.position.z) / dir.z;
+                    pos = camera.position.clone().add(dir.multiplyScalar(distToPlane));
+                }
+                
+                // Smooth movement
+                state.handPosition.lerp(pos, config.smoothing);
+                cursor.position.copy(state.handPosition);
+
+            } else {
+                handStatus.innerText = "Waiting...";
+                handStatus.className = "text-red-500";
+                cursor.visible = false;
+            }
+            canvasCtx.restore();
+        }
+
+        function checkInteractions() {
+            if (state.mode === 'MAP') {
+                // Check if hovering/pinching a pile
+                if (state.isPinching) {
+                    let hit = null;
+                    state.mapInteractables.forEach(obj => {
+                        if (cursor.position.distanceTo(obj.position) < 3.0) { // Increased hit radius
+                            hit = obj.userData.index;
+                        }
+                    });
+                    if (hit !== null) {
+                        startLevel(hit);
+                    }
+                }
+            } else if (state.mode === 'BUILD') {
+                // Logic for picking up pieces
+                if (state.isPinching && !state.heldPiece) {
+                    let closest = null;
+                    let minD = Infinity;
+                    state.pieces.forEach(p => {
+                        if(p.userData.isLocked) return;
+                        const d = cursor.position.distanceTo(p.position);
+                        if(d < config.grabRadius && d < minD) {
+                            minD = d; closest = p;
+                        }
+                    });
+                    if (closest) {
+                        state.heldPiece = closest;
+                        closest.material.emissive.setHex(0x555555);
+                        closest.scale.multiplyScalar(1.1);
+                    }
+                } else if (state.heldPiece) {
+                    if (state.isPinching) {
+                        state.heldPiece.position.copy(state.handPosition);
+                        if(state.heldPiece.position.distanceTo(state.heldPiece.userData.targetPos) < config.snapDistance) {
+                            state.heldPiece.material.emissive.setHex(0xFFFFFF);
+                        } else {
+                            state.heldPiece.material.emissive.setHex(0x555555);
+                        }
+                    } else {
+                        // Drop
+                        const p = state.heldPiece;
+                        p.scale.multiplyScalar(1/1.1);
+                        if(p.position.distanceTo(p.userData.targetPos) < config.snapDistance) {
+                            // Snap
+                            p.position.copy(p.userData.targetPos);
+                            p.rotation.set(0,0,0);
+                            p.userData.isLocked = true;
+                            p.material.emissive.setHex(0x000000);
+                            AudioSys.playSnap();
+                            triggerConfetti(p.position);
+                            state.completedCount++;
+                            
+                            if (state.completedCount === state.pieces.length) {
+                                state.builtStatus[state.activeLevel] = true;
+                                AudioSys.playWin();
+                                setTimeout(() => {
+                                    switchScreen('levelComplete');
+                                }, 1000);
+                            }
+                        } else {
+                            p.material.emissive.setHex(0x000000);
+                        }
+                        state.heldPiece = null;
+                    }
+                }
+            }
+        }
+
+        function triggerConfetti(pos) {
+            const particleCount = 20;
+            const geo = new THREE.BoxGeometry(0.15, 0.15, 0.15);
+            for(let i=0; i<particleCount; i++) {
+                const mesh = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({color: Math.random()*0xffffff}));
+                mesh.position.copy(pos);
+                mesh.userData.vel = new THREE.Vector3((Math.random()-0.5), (Math.random()+0.5), (Math.random()-0.5)).multiplyScalar(0.2);
+                scene.add(mesh);
+                
+                const anim = () => {
+                    mesh.position.add(mesh.userData.vel);
+                    mesh.userData.vel.y -= 0.01;
+                    mesh.scale.multiplyScalar(0.9);
+                    if(mesh.scale.x < 0.01) scene.remove(mesh);
+                    else requestAnimationFrame(anim);
+                }
+                anim();
+            }
+        }
+
+        // --- 6. Manual Process Loop ---
+        const hands = new Hands({locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`});
+        
+        hands.setOptions({
+            maxNumHands: 1, 
+            modelComplexity: 1, 
+            minDetectionConfidence: 0.5, 
+            minTrackingConfidence: 0.5
+        });
+        
+        hands.onResults(onResults);
+
+        // Offscreen canvas for stable video input
+        const inputCanvas = document.createElement('canvas');
+        const inputCtx = inputCanvas.getContext('2d');
+        
+        let isLooping = false; // Flag to stop loop on error
+        let isProcessing = false; // Flag to prevent concurrent calls
+
+        async function processVideoFrame() {
+            if (!isLooping) return;
+
+            // Ensure video is playing and has data
+            if (!videoElement.paused && !videoElement.ended && videoElement.readyState >= 2 && !isProcessing) {
+                
+                isProcessing = true; 
+
+                // Keep input canvas matched to video dims
+                if (inputCanvas.width !== videoElement.videoWidth) {
+                    inputCanvas.width = videoElement.videoWidth;
+                    inputCanvas.height = videoElement.videoHeight;
+                }
+
+                // Explicitly draw video to canvas to verify valid pixel data
+                inputCtx.drawImage(videoElement, 0, 0);
+
+                try {
+                    // Send Canvas instead of raw video element
+                    await hands.send({image: inputCanvas});
+                } catch (err) {
+                    console.warn("MP Dropped Frame (Recovering...):", err);
+                    // We catch the abort but DO NOT reload. Just wait a bit.
+                    isProcessing = false;
+                    setTimeout(() => {
+                        if(isLooping) requestAnimationFrame(processVideoFrame);
+                    }, 500); // Wait 0.5s before trying again if it crashed
+                    return; 
+                } finally {
+                    isProcessing = false; 
+                }
+            }
+            
+            // Throttle to ~15 FPS (60ms) to be very safe against memory crashes
+            setTimeout(() => {
+                if (isLooping) requestAnimationFrame(processVideoFrame);
+            }, 60);
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            const time = clock.getElapsedTime();
+
+            if (state.mode === 'MAP') {
+                // Animate Arrows
+                state.mapGroup.children.forEach(c => {
+                    if (c.children) {
+                        c.children.forEach(sub => {
+                            // Spin
+                            if (sub.userData.spin) sub.rotation.y += 0.05;
+                            // Bounce
+                            if (sub.userData.bounce) sub.position.y = 2.5 + Math.sin(time * 3) * 0.5;
+                        });
+                    }
+                });
+                checkInteractions();
+            } else if (state.mode === 'BUILD') {
+                state.pieces.forEach((p, i) => {
+                    if (!p.userData.isLocked && p !== state.heldPiece) {
+                        p.position.y += Math.sin(time*3 + i)*0.005;
+                    }
+                });
+                checkInteractions();
+            }
+
+            renderer.render(scene, camera);
+        }
+
+        const clock = new THREE.Clock();
+
+        document.getElementById('start-btn').addEventListener('click', async () => {
+            const btn = document.getElementById('start-btn');
+            btn.innerText = "Loading..."; btn.disabled = true;
+
+            try {
+                // Manual Camera Start with Fallback Logic
+                let stream;
+                try {
+                    // Try optimal settings first
+                    stream = await navigator.mediaDevices.getUserMedia({ 
+                        video: { 
+                            width: { ideal: config.cameraWidth }, 
+                            height: { ideal: config.cameraHeight },
+                            facingMode: 'user'
+                        } 
+                    });
+                } catch (err) {
+                    console.warn("High-res camera failed, trying basic connection...", err);
+                    // Fallback to basic connection if ideal fails
+                    stream = await navigator.mediaDevices.getUserMedia({ video: true });
+                }
+                
+                videoElement.srcObject = stream;
+                
+                // Robust wait for video ready state
+                await new Promise((resolve) => {
+                    if (videoElement.readyState >= 1) { // HAVE_METADATA
+                        resolve();
+                    } else {
+                        videoElement.onloadedmetadata = () => resolve();
+                    }
+                });
+                
+                await videoElement.play();
+
+                // Update canvas to match the actual camera resolution we got
+                config.cameraWidth = videoElement.videoWidth; 
+                config.cameraHeight = videoElement.videoHeight;
+                canvasElement.width = config.cameraWidth; 
+                canvasElement.height = config.cameraHeight;
+                
+                startGame();
+                
+                // Start loops
+                isLooping = true;
+                processVideoFrame(); // MediaPipe loop
+                animate(); // ThreeJS loop
+
+            } catch (e) {
+                console.error("Camera Init Error:", e);
+                btn.innerText = "Try Again";
+                btn.disabled = false;
+                alert("Camera Error: " + e.name + ". Please check your camera permissions.");
+            }
+        });
+
+    </script>
+</body>
+</html>
